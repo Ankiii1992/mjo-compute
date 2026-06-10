@@ -1,0 +1,50 @@
+name: MJO Daily Pipeline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-mjo-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install git+https://github.com/WillyChap/MJOcast.git
+
+      - name: Fetch BOM observed RMM
+        run: python fetch_observed.py
+
+      - name: Compute ECMWF forecast RMM
+        run: python compute_rmm.py
+
+      - name: Combine into mjo_data.json
+        run: python combine_output.py
+
+      - name: Write archive file
+        run: |
+          mkdir -p data/archive
+          DATE=$(date -u +%Y-%m-%d)
+          cp data/mjo_data.json data/archive/${DATE}.json
+          echo "Archived to data/archive/${DATE}.json"
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/mjo_data.json data/archive/
+          git diff --staged --quiet || git commit -m "MJO data update $(date -u +%Y-%m-%d\ %H:%M\ UTC)"
+          git push
