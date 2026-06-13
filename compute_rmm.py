@@ -1,4 +1,5 @@
 from ecmwf.opendata import Client
+
 import xarray as xr
 import numpy as np
 import json
@@ -13,49 +14,46 @@ print("=" * 60)
 print()
 
 # --- Paths ---
-OBS_FILE   = "MJO_obs_created.nc"
-CLIMO_FILE = "ERA5_climo.nc"
+OBS_FILE   = "ncep_eofs.nc"    # NCEP/WH2004 EOF patterns — committed to repo
+CLIMO_FILE = "ERA5_climo.nc"   # ERA5 climatology — committed to repo
 OUTPUT     = "forecast_rmm.json"
-
-# Normalization scalars (from ERA5 filtered anomaly file)
-OLR_SCALAR  = 14.533773
-U850_SCALAR = 1.829570
-U200_SCALAR = 5.159616
-EOF_SCALE   = 11.709
 
 # Forecast steps 0 to 240h every 24h
 STEPS = list(range(0, 241, 24))
 
-# --- Step 1: Download NetCDF files if not present ---
-NC_URLS = {
-    OBS_FILE:   'https://github.com/WillyChap/MJOcast/raw/main/MJOcast/Observations/MJO_obs_created.nc',
-    CLIMO_FILE: 'https://github.com/WillyChap/MJOcast/raw/main/MJOcast/Observations/ERA5_climo.nc',
-}
-
-for fname, url in NC_URLS.items():
+# --- Step 1: Verify local NetCDF files are present ---
+# Both files are committed to the repo — no download needed.
+print("Step 1: Checking local NetCDF files...")
+for fname in [OBS_FILE, CLIMO_FILE]:
     if not os.path.exists(fname):
-        print(f"Downloading {fname}...")
-        r = requests.get(url, stream=True, timeout=120)
-        r.raise_for_status()
-        with open(fname, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=1024*1024):
-                f.write(chunk)
-        print(f"  Done — {os.path.getsize(fname)/1024/1024:.1f} MB")
-    else:
-        print(f"  {fname} already present")
+        raise FileNotFoundError(
+            f"{fname} not found. Make sure it is committed to the repo root."
+        )
+    print(f"  {fname} found ({os.path.getsize(fname)/1024:.1f} KB)")
 
-# --- Step 2: Load EOF patterns ---
+# --- Step 2: Load EOF patterns from NCEP file ---
 print()
-print("Step 2: Loading EOF patterns...")
-obs_ds    = xr.open_dataset(OBS_FILE)
+print("Step 2: Loading EOF patterns from NCEP file...")
+obs_ds = xr.open_dataset(OBS_FILE)
+
 eof1_olr  = obs_ds["eof1_olr"].values
 eof2_olr  = obs_ds["eof2_olr"].values
 eof1_u850 = obs_ds["eof1_u850"].values
 eof2_u850 = obs_ds["eof2_u850"].values
 eof1_u200 = obs_ds["eof1_u200"].values
 eof2_u200 = obs_ds["eof2_u200"].values
-eof_lons  = obs_ds["longitude"].values
+eof_lons  = obs_ds["lon1deg"].values   # 0–359 at 1-degree resolution
+
+# Read normalisation scalars from file attributes (NCEP/WH2004 values)
+OLR_SCALAR  = float(obs_ds.attrs["olr_scalar"])
+U850_SCALAR = float(obs_ds.attrs["u850_scalar"])
+U200_SCALAR = float(obs_ds.attrs["u200_scalar"])
+RMM1_STD    = float(obs_ds.attrs["rmm1_std"])
+RMM2_STD    = float(obs_ds.attrs["rmm2_std"])
+
 print(f"  EOF patterns loaded. Longitude points: {len(eof_lons)}")
+print(f"  Scalars — OLR: {OLR_SCALAR}  U850: {U850_SCALAR}  U200: {U200_SCALAR}")
+print(f"  RMM std — RMM1: {RMM1_STD:.4f}  RMM2: {RMM2_STD:.4f}")
 obs_ds.close()
 
 # --- Step 3: Load ERA5 climatology ---
@@ -77,9 +75,9 @@ def download_with_retry(params, target, max_retries=3):
             client.retrieve(**params, target=target)
             return True
         except Exception as e:
-            print(f"    Attempt {attempt+1} failed: {str(e)[:80]}")
+            print(f"  Attempt {attempt+1} failed: {str(e)[:80]}")
             if attempt < max_retries - 1:
-                print(f"    Retrying in 5 seconds...")
+                print(f"  Retrying in 5 seconds...")
                 time.sleep(5)
     return False
 
@@ -87,9 +85,9 @@ print("  U wind (850+200 hPa)...")
 for step in STEPS:
     fname = f"fcst_u_{step:03d}.grib2"
     if os.path.exists(fname):
-        print(f"    +{step:3d}h cached")
+        print(f"  +{step:3d}h cached")
         continue
-    print(f"    +{step:3d}h...", end=" ", flush=True)
+    print(f"  +{step:3d}h...", end=" ", flush=True)
     ok = download_with_retry({
         "type": "fc", "param": "u",
         "levtype": "pl", "levelist": [850, 200], "step": step,
@@ -100,9 +98,9 @@ print("  TTR (OLR)...")
 for step in STEPS:
     fname = f"fcst_ttr_{step:03d}.grib2"
     if os.path.exists(fname):
-        print(f"    +{step:3d}h cached")
+        print(f"  +{step:3d}h cached")
         continue
-    print(f"    +{step:3d}h...", end=" ", flush=True)
+    print(f"  +{step:3d}h...", end=" ", flush=True)
     ok = download_with_retry({
         "type": "fc", "param": "ttr",
         "levtype": "sfc", "step": step,
@@ -123,15 +121,15 @@ init_time = ds_u0.time.values
 init_dt = datetime.utcfromtimestamp(
     (init_time - np.datetime64('1970-01-01T00:00:00')) / np.timedelta64(1, 's')
 )
-ecmwf_lons     = ds_u0["longitude"].values
+ecmwf_lons = ds_u0["longitude"].values
 ecmwf_lons_360 = ecmwf_lons % 360
-sort_idx       = np.argsort(ecmwf_lons_360)
+sort_idx = np.argsort(ecmwf_lons_360)
 ds_u0.close()
 
 print(f"  Model init: {init_dt.strftime('%Y-%m-%d %H:%M UTC')}")
 print()
 
-climo_ds    = xr.open_dataset(CLIMO_FILE)
+climo_ds = xr.open_dataset(CLIMO_FILE)
 rmm_results = []
 
 for i in range(1, len(STEPS)):
@@ -160,8 +158,9 @@ for i in range(1, len(STEPS)):
     )
 
     valid_dt = init_dt + timedelta(hours=step)
-    doy      = valid_dt.timetuple().tm_yday
+    doy = valid_dt.timetuple().tm_yday
 
+    # Zonal means over 15S–15N
     u850_zm = ds_u["u"].sel(
         isobaricInhPa=850, latitude=slice(15, -15)
     ).mean(dim="latitude").values
@@ -174,30 +173,34 @@ for i in range(1, len(STEPS)):
                 ds_ttr_prev["ttr"].sel(latitude=slice(15, -15))
                ) / 86400.0).mean(dim="latitude").values
 
+    # Interpolate ECMWF grid → EOF lon grid (0–359, 1-degree)
     u850_interp = np.interp(eof_lons, ecmwf_lons_360[sort_idx], u850_zm[sort_idx])
     u200_interp = np.interp(eof_lons, ecmwf_lons_360[sort_idx], u200_zm[sort_idx])
     olr_interp  = np.interp(eof_lons, ecmwf_lons_360[sort_idx], olr_zm[sort_idx])
 
-    climo_day = climo_ds.sel(dayofyear=doy)
-    u850_anom = u850_interp - climo_day["uwnd850"].values
-    u200_anom = u200_interp - climo_day["uwnd200"].values
-    olr_anom  = olr_interp  - climo_day["olr"].values
+    # Remove climatology
+    climo_day  = climo_ds.sel(dayofyear=doy)
+    u850_anom  = u850_interp - climo_day["uwnd850"].values
+    u200_anom  = u200_interp - climo_day["uwnd200"].values
+    olr_anom   = olr_interp  - climo_day["olr"].values
 
+    # Normalise by NCEP scalars
     u850_anom_norm = u850_anom / U850_SCALAR
     u200_anom_norm = u200_anom / U200_SCALAR
     olr_anom_norm  = olr_anom  / OLR_SCALAR
 
+    # Project onto EOFs — divide by separate RMM1/RMM2 std (WH2004)
     rmm1 = (np.dot(olr_anom_norm,  eof1_olr)  +
             np.dot(u850_anom_norm, eof1_u850) +
-            np.dot(u200_anom_norm, eof1_u200)) / EOF_SCALE
+            np.dot(u200_anom_norm, eof1_u200)) / RMM1_STD
 
     rmm2 = (np.dot(olr_anom_norm,  eof2_olr)  +
             np.dot(u850_anom_norm, eof2_u850) +
-            np.dot(u200_anom_norm, eof2_u200)) / EOF_SCALE
+            np.dot(u200_anom_norm, eof2_u200)) / RMM2_STD
 
-    amplitude   = float(np.sqrt(rmm1**2 + rmm2**2))
-    angle       = np.degrees(np.arctan2(rmm2, rmm1))
-    phase       = int(((angle + 180) // 45) % 8) + 1
+    amplitude = float(np.sqrt(rmm1**2 + rmm2**2))
+    angle     = np.degrees(np.arctan2(rmm2, rmm1))
+    phase     = int(((angle + 180) // 45) % 8) + 1
     phase_label = "weak" if amplitude < 1.0 else str(phase)
 
     result = {
@@ -205,15 +208,15 @@ for i in range(1, len(STEPS)):
         "step_hours":  step,
         "rmm1":        round(float(rmm1), 4),
         "rmm2":        round(float(rmm2), 4),
-        "amplitude":   round(amplitude,   4),
+        "amplitude":   round(amplitude, 4),
         "phase":       phase,
         "phase_label": phase_label,
     }
     rmm_results.append(result)
 
-    print(f"  +{step:3d}h  {valid_dt.strftime('%Y-%m-%d')}  "
-          f"RMM1={rmm1:+.3f}  RMM2={rmm2:+.3f}  "
-          f"Amp={amplitude:.3f}  Phase={phase_label}")
+    print(f"  +{step:3d}h {valid_dt.strftime('%Y-%m-%d')} "
+          f"RMM1={rmm1:+.3f} RMM2={rmm2:+.3f} "
+          f"Amp={amplitude:.3f} Phase={phase_label}")
 
     ds_u.close()
     ds_ttr.close()
@@ -226,6 +229,7 @@ print()
 print("Step 6: Saving forecast_rmm.json...")
 output = {
     "model":           "ECMWF IFS",
+    "eof_source":      "NCEP/WH2004 (ncep_eofs.nc)",
     "init_time":       init_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
     "generated_utc":   datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     "n_forecast_days": len(rmm_results),
